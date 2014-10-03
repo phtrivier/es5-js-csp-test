@@ -24,5 +24,4 @@ node build/es5/index-ko.js
 
 ## Next steps
 
-* See could be done to make bundled work
-* Add a way to create an es5 compatible npm package from original project ?
+* Issue open :  https://github.com/ubolonton/js-csp/issues/8
