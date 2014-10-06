@@ -1,4 +1,4 @@
-require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);throw new Error("Cannot find module '"+o+"'")}var f=n[o]={exports:{}};t[o][0].call(f.exports,function(e){var n=t[o][1][e];return s(n?n:e)},f,f.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+!function(e){if("object"==typeof exports&&"undefined"!=typeof module)module.exports=e();else if("function"==typeof define&&define.amd)define([],e);else{var f;"undefined"!=typeof window?f=window:"undefined"!=typeof global?f=global:"undefined"!=typeof self&&(f=self),(f.srccsp||(f.srccsp={})).js=e()}}(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
 "use strict";
 
 var buffers = require("./impl/buffers");
@@ -7,24 +7,23 @@ var select = require("./impl/select");
 var process = require("./impl/process");
 var timers = require("./impl/timers");
 
-function spawn(gen, returnChannel) {
-  if (returnChannel) {
-    var ch = channels.chan(buffers.fixed(1));
-    (new process.Process(gen, function(value) {
+function spawn(gen) {
+  var ch = channels.chan(buffers.fixed(1));
+  (new process.Process(gen, function(value) {
+    if (value === channels.CLOSED) {
+      ch.close();
+    } else {
       process.put_then_callback(ch, value, function(ok) {
         ch.close();
       });
-    })).run();
-    return ch;
-  } else {
-    (new process.Process(gen)).run();
-    return null;
-  }
+    }
+  })).run();
+  return ch;
 };
 
-function go(f, args, returnChannel) {
+function go(f, args) {
   var gen = f.apply(null, args);
-  return spawn(gen, returnChannel);
+  return spawn(gen);
 };
 
 function chan(bufferOrNumber) {
@@ -64,19 +63,7 @@ module.exports = {
   timeout: timers.timeout
 };
 
-},{"./impl/buffers":5,"./impl/channels":6,"./impl/process":8,"./impl/select":9,"./impl/timers":10}],"i2jwt0":[function(require,module,exports){
-"use strict";
-
-var csp = require("./csp.core");
-var operations = require("./csp.operations");
-
-csp.operations = operations;
-
-module.exports = csp;
-
-},{"./csp.core":1,"./csp.operations":4}],"csp":[function(require,module,exports){
-module.exports=require('i2jwt0');
-},{}],4:[function(require,module,exports){
+},{"./impl/buffers":3,"./impl/channels":4,"./impl/process":6,"./impl/select":7,"./impl/timers":8}],2:[function(require,module,exports){
 "use strict";
 
 var Box = require("./impl/channels").Box;
@@ -461,6 +448,366 @@ function partition(n, ch, bufferOrN) {
   return out;
 }
 
+// For channel identification
+var genId = (function() {
+  var i = 0;
+  return function() {
+    i ++;
+    return "" + i;
+  };
+})();
+
+var ID_ATTR = "__csp_channel_id";
+
+// TODO: Do we need to check with hasOwnProperty?
+function len(obj) {
+  var count = 0;
+  for (var p in obj) {
+    count ++;
+  }
+  return count;
+}
+
+function chanId(ch) {
+  var id = ch[ID_ATTR];
+  if (id === undefined) {
+    id = ch[ID_ATTR] = genId();
+  }
+  return id;
+}
+
+var Mult = function(ch) {
+  this.taps = {};
+  this.ch = ch;
+};
+
+var Tap = function(channel, keepOpen) {
+  this.channel = channel;
+  this.keepOpen = keepOpen;
+};
+
+Mult.prototype.muxch = function() {
+  return this.ch;
+};
+
+Mult.prototype.tap = function(ch, keepOpen) {
+  var id = chanId(ch);
+  this.taps[id] = new Tap(ch, keepOpen);
+};
+
+Mult.prototype.untap = function(ch) {
+  delete this.taps[chanId(ch)];
+};
+
+Mult.prototype.untapAll = function() {
+  this.taps = {};
+};
+
+function mult(ch) {
+  var m = new Mult(ch);
+  var dchan = chan(1);
+  var dcount;
+  function makeDoneCallback(tap) {
+    return function(stillOpen) {
+      dcount --;
+      if (dcount === 0) {
+        putAsync(dchan, true, noOp);
+      }
+      if (!stillOpen) {
+        m.untap(tap.channel);
+      }
+    };
+  }
+  go(function*() {
+    while (true) {
+      var value = yield take(ch);
+      var id, t;
+      var taps = m.taps;
+      if (value === CLOSED) {
+        for (id in taps) {
+          t = taps[id];
+          if (!t.keepOpen) {
+            t.channel.close();
+          }
+        }
+        // TODO: Is this necessary?
+        m.untapAll();
+        break;
+      }
+      dcount = len(taps);
+      // XXX: This is because putAsync can actually call back
+      // immediately. Fix that
+      var initDcount = dcount;
+      // Put value on tapping channels...
+      for (id in taps) {
+        t = taps[id];
+        putAsync(t.channel, value, makeDoneCallback(t));
+      }
+      // ... waiting for all puts to complete
+      if (initDcount > 0) {
+        yield take(dchan);
+      }
+    }
+  });
+  return m;
+}
+
+mult.tap = function tap(m, ch, keepOpen) {
+  m.tap(ch, keepOpen);
+  return ch;
+};
+
+mult.untap = function untap(m, ch) {
+  m.untap(ch);
+};
+
+mult.untapAll = function untapAll(m) {
+  m.untapAll();
+};
+
+var Mix = function(ch) {
+  this.ch = ch;
+  this.stateMap = {};
+  this.change = chan();
+  this.soloMode = mix.MUTE;
+};
+
+Mix.prototype._changed = function() {
+  putAsync(this.change, true, noOp);
+};
+
+Mix.prototype._getAllState = function() {
+  var allState = {};
+  var stateMap = this.stateMap;
+  var solos = [];
+  var mutes = [];
+  var pauses = [];
+  var reads;
+  for (var id in stateMap) {
+    var chanData = stateMap[id];
+    var state = chanData.state;
+    var channel = chanData.channel;
+    if (state[mix.SOLO]) {
+      solos.push(channel);
+    }
+    // TODO
+    if (state[mix.MUTE]) {
+      mutes.push(channel);
+    }
+    if (state[mix.PAUSE]) {
+      pauses.push(channel);
+    }
+  }
+  var i, n;
+  if (this.soloMode === mix.PAUSE && solos.length > 0) {
+    n = solos.length;
+    reads = new Array(n + 1);
+    for (i = 0; i < n; i++) {
+      reads[i] = solos[i];
+    }
+    reads[n] = this.change;
+  } else {
+    reads = [];
+    for (id in stateMap) {
+      chanData = stateMap[id];
+      channel = chanData.channel;
+      if (pauses.indexOf(channel) < 0) {
+        reads.push(channel);
+      }
+    }
+    reads.push(this.change);
+  }
+
+  return {
+    solos: solos,
+    mutes: mutes,
+    reads: reads
+  };
+};
+
+Mix.prototype.admix = function(ch) {
+  this.stateMap[chanId(ch)] = {
+    channel: ch,
+    state: {}
+  };
+  this._changed();
+};
+
+Mix.prototype.unmix = function(ch) {
+  delete this.stateMap[chanId(ch)];
+  this._changed();
+};
+
+Mix.prototype.unmixAll = function() {
+  this.stateMap = {};
+  this._changed();
+};
+
+Mix.prototype.toggle = function(updateStateList) {
+  // [[ch1, {}], [ch2, {solo: true}]];
+  var length = updateStateList.length;
+  for (var i = 0; i < length; i++) {
+    var ch = updateStateList[i][0];
+    var id = chanId(ch);
+    var updateState = updateStateList[i][1];
+    var chanData = this.stateMap[id];
+    if (!chanData) {
+      chanData = this.stateMap[id] = {
+        channel: ch,
+        state: {}
+      };
+    }
+    for (var mode in updateState) {
+      chanData.state[mode] = updateState[mode];
+    }
+  }
+  this._changed();
+};
+
+Mix.prototype.setSoloMode = function(mode) {
+  if (VALID_SOLO_MODES.indexOf(mode) < 0) {
+    throw new Error("Mode must be one of: ", VALID_SOLO_MODES.join(", "));
+  }
+  this.soloMode = mode;
+  this._changed();
+};
+
+function mix(out) {
+  var m = new Mix(out);
+  go(function*() {
+    var state = m._getAllState();
+    while (true) {
+      var result = yield alts(state.reads);
+      var value = result.value;
+      var channel = result.channel;
+      if (value === CLOSED) {
+        delete m.stateMap[chanId(channel)];
+        state = m._getAllState();
+        continue;
+      }
+      if (channel === m.change) {
+        state = m._getAllState();
+        continue;
+      }
+      var solos = state.solos;
+      if (solos.indexOf(channel) > -1 ||
+          (solos.length && !(m.mutes.indexOf(channel) > -1))) {
+        var stillOpen = yield put(out, value);
+        if (!stillOpen) {
+          break;
+        }
+      }
+    }
+  });
+  return m;
+}
+
+mix.MUTE = "mute";
+mix.PAUSE = "pause";
+mix.SOLO = "solo";
+var VALID_SOLO_MODES = [mix.MUTE, mix.PAUSE];
+
+mix.add = function admix(m, ch) {
+  m.admix(ch);
+};
+
+mix.remove = function unmix(m, ch) {
+  m.unmix(ch);
+};
+
+mix.removeAll = function unmixAll(m) {
+  m.unmixAll();
+};
+
+mix.toggle = function toggle(m, updateStateList) {
+  m.toggle(updateStateList);
+};
+
+mix.setSoloMode = function setSoloMode(m, mode) {
+  m.setSoloMode(mode);
+};
+
+function constantlyNull() {
+  return null;
+}
+
+var Pub = function(ch, topicFn, bufferFn) {
+  this.ch = ch;
+  this.topicFn = topicFn;
+  this.bufferFn = bufferFn;
+  this.mults = {};
+};
+
+Pub.prototype._ensureMult = function(topic) {
+  var m = this.mults[topic];
+  var bufferFn = this.bufferFn;
+  if (!m) {
+    m = this.mults[topic] = mult(chan(bufferFn(topic)));
+  }
+  return m;
+};
+
+Pub.prototype.sub = function(topic, ch, keepOpen) {
+  var m = this._ensureMult(topic);
+  return mult.tap(m, ch, keepOpen);
+};
+
+Pub.prototype.unsub = function(topic, ch) {
+  var m = this.mults[topic];
+  if (m) {
+    mult.untap(m, ch);
+  }
+};
+
+Pub.prototype.unsubAll = function(topic) {
+  if (topic === undefined) {
+    this.mults = {};
+  } else {
+    delete this.mults[topic];
+  }
+};
+
+function pub(ch, topicFn, bufferFn) {
+  bufferFn = bufferFn || constantlyNull;
+  var p = new Pub(ch, topicFn, bufferFn);
+  go(function*() {
+    while (true) {
+      var value = yield take(ch);
+      var mults = p.mults;
+      var topic;
+      if (value === CLOSED) {
+        for (topic in mults) {
+          mults[topic].muxch().close();
+        }
+        break;
+      }
+      // TODO: Somehow ensure/document that this must return a string
+      // (otherwise use proper (hash)maps)
+      topic = topicFn(value);
+      var m = mults[topic];
+      if (m) {
+        var stillOpen = yield put(m.muxch(), value);
+        if (!stillOpen) {
+          delete mults[topic];
+        }
+      }
+    }
+  });
+  return p;
+}
+
+pub.sub = function sub(p, topic, ch, keepOpen) {
+  return p.sub(topic, ch, keepOpen);
+};
+
+pub.unsub = function unsub(p, topic, ch) {
+  p.unsub(topic, ch);
+};
+
+pub.unsubAll = function unsubAll(p, topic) {
+  p.unsubAll(topic);
+};
+
 module.exports = {
   mapFrom: mapFrom,
   mapInto: mapInto,
@@ -483,7 +830,11 @@ module.exports = {
   take: takeN,
   unique: unique,
   partition: partition,
-  partitionBy: partitionBy
+  partitionBy: partitionBy,
+
+  mult: mult,
+  mix: mix,
+  pub: pub
 };
 
 
@@ -507,7 +858,7 @@ module.exports = {
 //   .into([])
 //   .unwrap();
 
-},{"./csp.core":1,"./impl/channels":6}],5:[function(require,module,exports){
+},{"./csp.core":1,"./impl/channels":4}],3:[function(require,module,exports){
 "use strict";
 
 // TODO: Consider EmptyError & FullError to avoid redundant bound
@@ -694,7 +1045,7 @@ exports.sliding = function sliding_buffer(n) {
 
 exports.EMPTY = EMPTY;
 
-},{}],6:[function(require,module,exports){
+},{}],4:[function(require,module,exports){
 "use strict";
 
 var buffers = require("./buffers");
@@ -777,18 +1128,40 @@ Channel.prototype._take = function(handler) {
     return null;
   }
 
+  var putter, put_handler, callback;
+
   if (this.buf && this.buf.count() > 0) {
     handler.commit();
-    return new Box(this.buf.remove());
+    var value = this.buf.remove();
+    // We need to check pending puts here, other wise they won't
+    // be able to proceed until their number reaches MAX_DIRTY
+    while (true) {
+      putter = this.puts.pop();
+      if (putter !== buffers.EMPTY) {
+        put_handler = putter.handler;
+        if (put_handler.is_active()) {
+          callback = put_handler.commit();
+          dispatch.run(function() {
+            callback(true);
+          });
+          this.buf.add(putter.value);
+          break;
+        } else {
+          continue;
+        }
+      }
+      break;
+    }
+    return new Box(value);
   }
 
   while (true) {
-    var putter = this.puts.pop();
+    putter = this.puts.pop();
     if (putter !== buffers.EMPTY) {
-      var put_handler = putter.handler;
+      put_handler = putter.handler;
       if (put_handler.is_active()) {
         handler.commit();
-        var callback = put_handler.commit();
+        callback = put_handler.commit();
         dispatch.run(function() {
           callback(true);
         });
@@ -867,7 +1240,7 @@ exports.Box = Box;
 
 exports.CLOSED = CLOSED;
 
-},{"./buffers":5,"./dispatch":7}],7:[function(require,module,exports){
+},{"./buffers":3,"./dispatch":5}],5:[function(require,module,exports){
 "use strict";
 
 // TODO: Use process.nextTick if it's available since it's more
@@ -951,7 +1324,7 @@ exports.queue_delay = function(f, delay) {
   setTimeout(f, delay);
 };
 
-},{"./buffers":5}],8:[function(require,module,exports){
+},{"./buffers":3}],6:[function(require,module,exports){
 "use strict";
 
 var dispatch = require("./dispatch");
@@ -1103,7 +1476,7 @@ exports.alts = alts;
 
 exports.Process = Process;
 
-},{"./dispatch":7,"./select":9}],9:[function(require,module,exports){
+},{"./dispatch":5,"./select":7}],7:[function(require,module,exports){
 "use strict";
 
 var Box = require("./channels").Box;
@@ -1207,7 +1580,7 @@ exports.do_alts = function(operations, callback, options) {
 
 exports.DEFAULT = DEFAULT;
 
-},{"./channels":6}],10:[function(require,module,exports){
+},{"./channels":4}],8:[function(require,module,exports){
 "use strict";
 
 var dispatch = require("./dispatch");
@@ -1221,4 +1594,15 @@ exports.timeout = function timeout_channel(msecs) {
   return chan;
 };
 
-},{"./channels":6,"./dispatch":7}]},{},["i2jwt0"])
+},{"./channels":4,"./dispatch":5}],"csp":[function(require,module,exports){
+"use strict";
+
+var csp = require("./csp.core");
+var operations = require("./csp.operations");
+
+csp.operations = operations;
+
+module.exports = csp;
+
+},{"./csp.core":1,"./csp.operations":2}]},{},[])("csp")
+});
